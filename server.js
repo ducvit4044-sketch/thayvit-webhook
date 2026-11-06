@@ -1,23 +1,27 @@
 const express = require("express");
 const admin = require("firebase-admin");
 const path = require("path");
+const cors = require("cors");
 const PayOS = require("@payos/node");
 
-// Khởi tạo Firebase Admin
+// Khởi tạo Firebase Admin an toàn
 const serviceAccount = require(path.join(__dirname, "serviceAccountKey.json"));
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount)
-});
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount)
+  });
+}
 const db = admin.firestore();
 
-// Khởi tạo PayOS SDK (Điền chính xác 3 khóa từ kênh thanh toán PayOS)
-const payos = new PayOS(
-  "f4b1e039-f6f9-4ed2-ac76-f8cb608983be",
-  "ab7a7692-1cb3-4a5f-92e8-845fe82c6fe0",
-  "e992a7ea872e073eebf6001915f02ec3e059d7c26bf3767bd9a7feac9385df72"
-);
+// Khởi tạo PayOS SDK theo cấu trúc Object chuẩn
+const payos = new PayOS({
+  clientId: "f4b1e039-f6f9-4ed2-ac76-f8cb608983be",
+  apiKey: "ab7a7692-1cb3-4a5f-92e8-845fe82c6fe0",
+  checksumKey: "e992a7ea872e073eebf6001915f02ec3e059d7c26bf3767bd9a7feac9385df72"
+});
 
 const app = express();
+app.use(cors());
 app.use(express.json());
 
 function generateUniqueVipCode() {
@@ -43,23 +47,23 @@ app.post("/create-payment-order", async (req, res) => {
 
     const paymentData = {
       orderCode: orderCode,
-      amount: 2000, // Hoặc 49000 khi đưa vào sản xuất
-      description: transferNote.slice(0, 25), // PayOS giới hạn tối đa 25 ký tự
-      cancelUrl: "https://thayvit-webhook.onrender.com/cancel",
-      returnUrl: "https://thayvit-webhook.onrender.com/success"
+      amount: 2000, // Đổi thành 49000 khi đưa vào sản xuất
+      description: (transferNote || "THAYVIT").slice(0, 25), // Tối đa 25 ký tự
+      cancelUrl: "https://thayvit-webhook.onrender.com",
+      returnUrl: "https://thayvit-webhook.onrender.com"
     };
 
     // Gọi PayOS tạo Payment Link
     const paymentLinkRes = await payos.createPaymentLink(paymentData);
 
-    // Lưu vào Firestore với ID là transferNote để app lắng nghe
+    // Lưu đơn hàng vào Firestore với Document ID là transferNote để app lắng nghe
     await db.collection("payment_orders").doc(transferNote).set({
       orderCode: orderCode,
       userId: userId || "",
       userEmail: userEmail || "",
       amount: 2000,
       status: "PENDING",
-      qrCodeUrl: paymentLinkRes.qrCode, // Chuỗi QR chuẩn PayOS cấp
+      qrCodeUrl: paymentLinkRes.qrCode, // Chuỗi QR VietQR Pro từ PayOS
       createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
