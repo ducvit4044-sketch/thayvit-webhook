@@ -6,11 +6,30 @@ const cors = require("cors");
 // 1. SỬA IMPORT: Destructuring trực tiếp class PayOS từ package
 const { PayOS } = require("@payos/node");
 
-// Khởi tạo Firebase Admin an toàn
-const serviceAccount = require(path.join(__dirname, "serviceAccountKey.json"));
+// Khởi tạo Firebase Admin an toàn (Ưu tiên đọc từ biến môi trường FIREBASE_SERVICE_ACCOUNT trên Render)
 if (!admin.apps.length) {
+  let credential;
+  if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+    try {
+      const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+      credential = admin.credential.cert(serviceAccount);
+    } catch (e) {
+      console.error("Lỗi parse FIREBASE_SERVICE_ACCOUNT từ biến môi trường:", e);
+    }
+  }
+
+  // Fallback đọc file nếu chạy ở máy cá nhân (Local)
+  if (!credential) {
+    try {
+      const serviceAccount = require(path.join(__dirname, "serviceAccountKey.json"));
+      credential = admin.credential.cert(serviceAccount);
+    } catch (e) {
+      console.error("Không tìm thấy file serviceAccountKey.json local:", e);
+    }
+  }
+
   admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount)
+    credential: credential
   });
 }
 const db = admin.firestore();
