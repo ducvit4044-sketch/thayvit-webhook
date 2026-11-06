@@ -3,9 +3,8 @@ const admin = require("firebase-admin");
 const path = require("path");
 const cors = require("cors");
 
-// 1. SỬA IMPORT: Tương thích cả export default lẫn export thường của @payos/node
-const PayOSPackage = require("@payos/node");
-const PayOS = PayOSPackage.default || PayOSPackage;
+// 1. SỬA IMPORT: Destructuring trực tiếp class PayOS từ package
+const { PayOS } = require("@payos/node");
 
 // Khởi tạo Firebase Admin an toàn
 const serviceAccount = require(path.join(__dirname, "serviceAccountKey.json"));
@@ -16,7 +15,7 @@ if (!admin.apps.length) {
 }
 const db = admin.firestore();
 
-// 2. SỬA KHỞI TẠO: Truyền trực tiếp 3 chuỗi khóa (Client ID, API Key, Checksum Key)
+// 2. KHỞI TẠO: Truyền trực tiếp 3 chuỗi khóa (Client ID, API Key, Checksum Key)
 const payos = new PayOS(
   "f4b1e039-f6f9-4ed2-ac76-f8cb608983be",
   "ab7a7692-1cb3-4a5f-92e8-845fe82c6fe0",
