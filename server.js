@@ -2,39 +2,25 @@ const express = require("express");
 const admin = require("firebase-admin");
 const path = require("path");
 const cors = require("cors");
-
-// 1. SỬA IMPORT: Destructuring trực tiếp class PayOS từ package
 const { PayOS } = require("@payos/node");
 
-// Khởi tạo Firebase Admin an toàn (Ưu tiên đọc từ biến môi trường FIREBASE_SERVICE_ACCOUNT trên Render)
+// Khởi tạo Firebase Admin an toàn bằng file serviceAccountKey.json
+const serviceAccountPath = path.join(__dirname, "serviceAccountKey.json");
+const serviceAccount = require(serviceAccountPath);
+
+// Xử lý private key format nếu bị dính ký tự escape
+if (serviceAccount.private_key) {
+  serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, "\n");
+}
+
 if (!admin.apps.length) {
-  let credential;
-  if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-    try {
-      const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-      credential = admin.credential.cert(serviceAccount);
-    } catch (e) {
-      console.error("Lỗi parse FIREBASE_SERVICE_ACCOUNT từ biến môi trường:", e);
-    }
-  }
-
-  // Fallback đọc file nếu chạy ở máy cá nhân (Local)
-  if (!credential) {
-    try {
-      const serviceAccount = require(path.join(__dirname, "serviceAccountKey.json"));
-      credential = admin.credential.cert(serviceAccount);
-    } catch (e) {
-      console.error("Không tìm thấy file serviceAccountKey.json local:", e);
-    }
-  }
-
   admin.initializeApp({
-    credential: credential
+    credential: admin.credential.cert(serviceAccount)
   });
 }
 const db = admin.firestore();
 
-// 2. KHỞI TẠO: Bọc 3 khóa vào một Object { clientId, apiKey, checksumKey }
+// Khởi tạo PayOS SDK
 const payos = new PayOS({
   clientId: "f4b1e039-f6f9-4ed2-ac76-f8cb608983be",
   apiKey: "ab7a7692-1cb3-4a5f-92e8-845fe82c6fe0",
@@ -63,18 +49,16 @@ app.post("/create-payment-order", async (req, res) => {
   try {
     const { userId, userEmail, transferNote } = req.body;
 
-    // PayOS yêu cầu orderCode là số nguyên dương duy nhất (tối đa 9007199254740991)
     const orderCode = Number(String(Date.now()).slice(-9)); 
 
     const paymentData = {
       orderCode: orderCode,
-      amount: 2000, // Đổi thành 49000 khi đưa vào sản xuất
-      description: (transferNote || "THAYVIT").slice(0, 25), // Tối đa 25 ký tự
+      amount: 2000,
+      description: (transferNote || "THAYVIT").slice(0, 25),
       cancelUrl: "https://thayvit-webhook.onrender.com",
       returnUrl: "https://thayvit-webhook.onrender.com"
     };
 
-    // ĐÃ SỬA: Gọi API tương thích với các phiên bản của SDK PayOS
     let paymentLinkRes;
     if (payos.paymentRequests && typeof payos.paymentRequests.create === "function") {
       paymentLinkRes = await payos.paymentRequests.create(paymentData);
@@ -84,10 +68,8 @@ app.post("/create-payment-order", async (req, res) => {
       throw new Error("Không tìm thấy hàm tạo link trên PayOS SDK instance");
     }
 
-    // Tạo link ảnh VietQR để app Android hiển thị qua AsyncImage
     const qrImage = `https://api.vietqr.io/image/970422-0933203356-compact2.png?amount=2000&addInfo=${transferNote}&accountName=DO%20THANH%20DANH`;
 
-    // Lưu đơn hàng vào Firestore với Document ID là transferNote để app lắng nghe
     await db.collection("payment_orders").doc(transferNote).set({
       orderCode: orderCode,
       userId: userId || "",
@@ -125,7 +107,6 @@ app.post("/payos-webhook", async (req, res) => {
       return res.status(200).json({ message: "Số tiền chưa đủ" });
     }
 
-    // Trích xuất mã đơn TV...
     const cleanDesc = description.replace(/\s+/g, "").toUpperCase();
     const match = cleanDesc.match(/TV[A-Z0-9]+/i);
     let orderDoc = null;
@@ -136,7 +117,6 @@ app.post("/payos-webhook", async (req, res) => {
       orderDoc = await orderRef.get();
     }
 
-    // Dự phòng tìm theo orderCode nếu nội dung ngân hàng bị cắt bớt
     if (!orderDoc || !orderDoc.exists) {
       const querySnapshot = await db.collection("payment_orders")
         .where("orderCode", "==", orderCode)
@@ -156,7 +136,6 @@ app.post("/payos-webhook", async (req, res) => {
       return res.status(200).json({ message: "Đơn hàng đã được thanh toán trước đó" });
     }
 
-    // Sinh mã VIP duy nhất
     const newVipCode = generateUniqueVipCode();
     const batch = db.batch();
 
