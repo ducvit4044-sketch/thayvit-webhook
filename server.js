@@ -2,7 +2,10 @@ const express = require("express");
 const admin = require("firebase-admin");
 const path = require("path");
 const cors = require("cors");
-const PayOS = require("@payos/node");
+
+// 1. SỬA IMPORT: Tương thích cả export default lẫn export thường của @payos/node
+const PayOSPackage = require("@payos/node");
+const PayOS = PayOSPackage.default || PayOSPackage;
 
 // Khởi tạo Firebase Admin an toàn
 const serviceAccount = require(path.join(__dirname, "serviceAccountKey.json"));
@@ -13,12 +16,12 @@ if (!admin.apps.length) {
 }
 const db = admin.firestore();
 
-// Khởi tạo PayOS SDK theo cấu trúc Object chuẩn
-const payos = new PayOS({
-  clientId: "f4b1e039-f6f9-4ed2-ac76-f8cb608983be",
-  apiKey: "ab7a7692-1cb3-4a5f-92e8-845fe82c6fe0",
-  checksumKey: "e992a7ea872e073eebf6001915f02ec3e059d7c26bf3767bd9a7feac9385df72"
-});
+// 2. SỬA KHỞI TẠO: Truyền trực tiếp 3 chuỗi khóa (Client ID, API Key, Checksum Key)
+const payos = new PayOS(
+  "f4b1e039-f6f9-4ed2-ac76-f8cb608983be",
+  "ab7a7692-1cb3-4a5f-92e8-845fe82c6fe0",
+  "e992a7ea872e073eebf6001915f02ec3e059d7c26bf3767bd9a7feac9385df72"
+);
 
 const app = express();
 app.use(cors());
