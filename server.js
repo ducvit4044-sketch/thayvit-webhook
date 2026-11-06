@@ -1,31 +1,78 @@
 const express = require("express");
 const admin = require("firebase-admin");
+const fs = require("fs");
 const path = require("path");
 const cors = require("cors");
 const { PayOS } = require("@payos/node");
 
-// Khởi tạo Firebase Admin an toàn bằng file serviceAccountKey.json
-const serviceAccountPath = path.join(__dirname, "serviceAccountKey.json");
-const serviceAccount = require(serviceAccountPath);
+// ---------------------------------------------------------------
+// 1. FIREBASE ADMIN
+//    Ưu tiên: biến FIREBASE_SERVICE_ACCOUNT (JSON) -> Secret File của Render
+//    -> GOOGLE_APPLICATION_CREDENTIALS -> file serviceAccountKey.json cạnh server.js (chỉ để chạy local)
+// ---------------------------------------------------------------
+function loadServiceAccount() {
+  let sa = null;
 
-// Xử lý private key format nếu bị dính ký tự escape
-if (serviceAccount.private_key) {
-  serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, "\n");
+  if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+    sa = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+  } else {
+    const candidates = [
+      process.env.GOOGLE_APPLICATION_CREDENTIALS,
+      "/etc/secrets/serviceAccountKey.json", // Secret File trên Render
+      path.join(__dirname, "serviceAccountKey.json"), // local
+    ].filter(Boolean);
+
+    for (const p of candidates) {
+      if (fs.existsSync(p)) {
+        console.log("Đọc service account từ:", p);
+        sa = JSON.parse(fs.readFileSync(p, "utf8"));
+        break;
+      }
+    }
+  }
+
+  if (!sa) {
+    throw new Error(
+      "Không tìm thấy service account. Hãy tạo Secret File 'serviceAccountKey.json' hoặc biến FIREBASE_SERVICE_ACCOUNT trên Render."
+    );
+  }
+  if (sa.private_key) {
+    sa.private_key = sa.private_key.replace(/\\n/g, "\n");
+  }
+  return sa;
 }
 
+const serviceAccount = loadServiceAccount();
 if (!admin.apps.length) {
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount)
-  });
+  admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
 }
+console.log("Firebase project:", serviceAccount.project_id);
 const db = admin.firestore();
 
-// Khởi tạo PayOS SDK
+// Kiểm tra kết nối Firestore ngay lúc khởi động để thấy lỗi xác thực sớm trong log
+db.collection("payment_orders")
+  .limit(1)
+  .get()
+  .then(() => console.log("Firestore: kết nối OK"))
+  .catch((e) => console.error("Firestore: KẾT NỐI LỖI ->", e.message));
+
+// ---------------------------------------------------------------
+// 2. PAYOS (khoá lấy từ biến môi trường trên Render, KHÔNG viết vào code)
+// ---------------------------------------------------------------
+const { PAYOS_CLIENT_ID, PAYOS_API_KEY, PAYOS_CHECKSUM_KEY } = process.env;
+if (!PAYOS_CLIENT_ID || !PAYOS_API_KEY || !PAYOS_CHECKSUM_KEY) {
+  console.error(
+    "THIẾU biến môi trường PayOS: PAYOS_CLIENT_ID / PAYOS_API_KEY / PAYOS_CHECKSUM_KEY"
+  );
+}
 const payos = new PayOS({
-  clientId: "f4b1e039-f6f9-4ed2-ac76-f8cb608983be",
-  apiKey: "ab7a7692-1cb3-4a5f-92e8-845fe82c6fe0",
-  checksumKey: "e992a7ea872e073eebf6001915f02ec3e059d7c26bf3767bd9a7feac9385df72"
+  clientId: PAYOS_CLIENT_ID,
+  apiKey: PAYOS_API_KEY,
+  checksumKey: PAYOS_CHECKSUM_KEY,
 });
+
+const APP_URL = process.env.APP_URL || "https://thayvit-webhook.onrender.com";
+const PRICE = 2000;
 
 const app = express();
 app.use(cors());
@@ -44,120 +91,158 @@ app.get("/", (req, res) => {
   res.send("Thay Vit Webhook Server is running!");
 });
 
-// 1. API CHO APP GỌI ĐỂ TẠO ĐƠN VÀ LẤY MÃ VIETQR CHUẨN PAYOS
+// ---------------------------------------------------------------
+// 3. APP GỌI ĐỂ TẠO ĐƠN VÀ LẤY MÃ QR
+// ---------------------------------------------------------------
 app.post("/create-payment-order", async (req, res) => {
+  const { userId, userEmail, transferNote } = req.body || {};
+  const orderCode = Number(String(Date.now()).slice(-9));
+
+  // Bước A: tạo link thanh toán PayOS
+  let link;
   try {
-    const { userId, userEmail, transferNote } = req.body;
+    // Mô tả phải ngắn, không dấu (tối đa 9 ký tự nếu tài khoản không liên kết qua payOS, 25 nếu có)
+    const desc = String(transferNote || `TV${orderCode}`)
+      .replace(/[^A-Za-z0-9 ]/g, "")
+      .slice(0, 25);
 
-    const orderCode = Number(String(Date.now()).slice(-9)); 
+    link = await payos.paymentRequests.create({
+      orderCode,
+      amount: PRICE,
+      description: desc,
+      cancelUrl: APP_URL,
+      returnUrl: APP_URL,
+    });
+  } catch (error) {
+    console.error("[PAYOS] Lỗi tạo link thanh toán:", error);
+    return res.status(500).json({ error: "PAYOS: " + error.message });
+  }
 
-    const paymentData = {
-      orderCode: orderCode,
-      amount: 2000,
-      description: (transferNote || "THAYVIT").slice(0, 25),
-      cancelUrl: "https://thayvit-webhook.onrender.com",
-      returnUrl: "https://thayvit-webhook.onrender.com"
-    };
+  // QR dùng đúng thông tin tài khoản + nội dung do PayOS trả về,
+  // để PayOS nhận diện được giao dịch và gọi webhook.
+  const qrImage =
+    `https://img.vietqr.io/image/${link.bin}-${link.accountNumber}-compact2.png` +
+    `?amount=${link.amount}&addInfo=${encodeURIComponent(link.description)}` +
+    `&accountName=${encodeURIComponent(link.accountName || "")}`;
 
-    let paymentLinkRes;
-    if (payos.paymentRequests && typeof payos.paymentRequests.create === "function") {
-      paymentLinkRes = await payos.paymentRequests.create(paymentData);
-    } else if (typeof payos.createPaymentLink === "function") {
-      paymentLinkRes = await payos.createPaymentLink(paymentData);
-    } else {
-      throw new Error("Không tìm thấy hàm tạo link trên PayOS SDK instance");
-    }
-
-    const qrImage = `https://api.vietqr.io/image/970422-0933203356-compact2.png?amount=2000&addInfo=${transferNote}&accountName=DO%20THANH%20DANH`;
-
-    await db.collection("payment_orders").doc(transferNote).set({
-      orderCode: orderCode,
+  // Bước B: lưu đơn vào Firestore
+  try {
+    const docId = String(transferNote || `TV${orderCode}`).replace(/[^A-Za-z0-9_-]/g, "");
+    await db.collection("payment_orders").doc(docId).set({
+      orderCode,
       userId: userId || "",
       userEmail: userEmail || "",
-      amount: 2000,
+      amount: PRICE,
       status: "PENDING",
       qrCodeUrl: qrImage,
-      paymentLinkId: paymentLinkRes.paymentLinkId || paymentLinkRes.id || "",
-      createdAt: admin.firestore.FieldValue.serverTimestamp()
+      paymentLinkId: link.paymentLinkId || "",
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
     return res.status(200).json({
       success: true,
-      orderCode: orderCode,
-      qrCodeUrl: qrImage
+      orderCode,
+      qrCodeUrl: qrImage,
+      checkoutUrl: link.checkoutUrl || "",
+      qrCode: link.qrCode || "",
     });
   } catch (error) {
-    console.error("Lỗi tạo link thanh toán PayOS:", error);
+    console.error("[FIRESTORE] Lỗi lưu đơn hàng:", error);
+    return res.status(500).json({ error: "FIRESTORE: " + error.message });
+  }
+});
+
+// App hỏi trạng thái đơn (dùng song song với webhook)
+app.get("/order-status/:orderCode", async (req, res) => {
+  try {
+    const snap = await db
+      .collection("payment_orders")
+      .where("orderCode", "==", Number(req.params.orderCode))
+      .limit(1)
+      .get();
+    if (snap.empty) return res.status(404).json({ error: "Không thấy đơn" });
+    const d = snap.docs[0].data();
+    return res.json({ status: d.status, code: d.status === "PAID" ? d.generatedCode : null });
+  } catch (error) {
+    console.error("[ORDER-STATUS]", error);
     return res.status(500).json({ error: error.message });
   }
 });
 
-// 2. WEBHOOK NHẬN KẾT QUẢ THANH TOÁN TỪ PAYOS
+// ---------------------------------------------------------------
+// 4. WEBHOOK NHẬN KẾT QUẢ THANH TOÁN TỪ PAYOS
+// ---------------------------------------------------------------
 app.post("/payos-webhook", async (req, res) => {
+  // Xác thực chữ ký: chặn người lạ giả mạo webhook để lấy mã VIP miễn phí
+  let data;
   try {
-    const webhookData = req.body;
+    if (payos.webhooks && typeof payos.webhooks.verify === "function") {
+      data = await payos.webhooks.verify(req.body);
+    } else {
+      data = payos.verifyPaymentWebhookData(req.body);
+    }
+  } catch (error) {
+    console.error("[WEBHOOK] Chữ ký không hợp lệ:", error.message);
+    return res.status(400).json({ error: "Invalid signature" });
+  }
 
-    if (webhookData.code !== "00" || !webhookData.data) {
+  try {
+    if (req.body.code !== "00") {
       return res.status(200).json({ message: "Bỏ qua giao dịch chưa hoàn tất" });
     }
 
-    const { description, amount, orderCode } = webhookData.data;
-
-    if (amount < 2000) {
+    const { description, amount, orderCode } = data;
+    if (amount < PRICE) {
       return res.status(200).json({ message: "Số tiền chưa đủ" });
     }
 
-    const cleanDesc = description.replace(/\s+/g, "").toUpperCase();
-    const match = cleanDesc.match(/TV[A-Z0-9]+/i);
-    let orderDoc = null;
+    // Tìm đơn: ưu tiên theo orderCode (đáng tin nhất), sau đó theo nội dung chuyển khoản
     let orderRef = null;
-
-    if (match) {
-      orderRef = db.collection("payment_orders").doc(match[0]);
-      orderDoc = await orderRef.get();
-    }
-
-    if (!orderDoc || !orderDoc.exists) {
-      const querySnapshot = await db.collection("payment_orders")
-        .where("orderCode", "==", orderCode)
-        .limit(1)
-        .get();
-      if (!querySnapshot.empty) {
-        orderDoc = querySnapshot.docs[0];
-        orderRef = orderDoc.ref;
+    const byCode = await db
+      .collection("payment_orders")
+      .where("orderCode", "==", orderCode)
+      .limit(1)
+      .get();
+    if (!byCode.empty) {
+      orderRef = byCode.docs[0].ref;
+    } else {
+      const clean = String(description || "").replace(/\s+/g, "").toUpperCase();
+      const match = clean.match(/TV[A-Z0-9]+/);
+      if (match) {
+        const ref = db.collection("payment_orders").doc(match[0]);
+        if ((await ref.get()).exists) orderRef = ref;
       }
     }
 
-    if (!orderDoc || !orderDoc.exists) {
+    if (!orderRef) {
       return res.status(200).json({ message: "Không tìm thấy đơn hàng trên hệ thống" });
     }
 
-    if (orderDoc.data().status === "PAID") {
-      return res.status(200).json({ message: "Đơn hàng đã được thanh toán trước đó" });
-    }
-
-    const newVipCode = generateUniqueVipCode();
-    const batch = db.batch();
-
-    const codeRef = db.collection("vip_codes").doc(newVipCode);
-    batch.set(codeRef, {
-      code: newVipCode,
-      isUsed: false,
-      usedBy: "",
-      orderNote: orderDoc.id,
-      createdAt: admin.firestore.FieldValue.serverTimestamp()
+    // Dùng transaction để webhook gọi trùng không tạo 2 mã VIP
+    const result = await db.runTransaction(async (t) => {
+      const snap = await t.get(orderRef);
+      if (snap.data().status === "PAID") {
+        return { already: true, code: snap.data().generatedCode };
+      }
+      const newVipCode = generateUniqueVipCode();
+      t.set(db.collection("vip_codes").doc(newVipCode), {
+        code: newVipCode,
+        isUsed: false,
+        usedBy: "",
+        orderNote: snap.id,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      t.update(orderRef, {
+        status: "PAID",
+        generatedCode: newVipCode,
+        paidAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      return { already: false, code: newVipCode };
     });
 
-    batch.update(orderRef, {
-      status: "PAID",
-      generatedCode: newVipCode,
-      paidAt: admin.firestore.FieldValue.serverTimestamp()
-    });
-
-    await batch.commit();
-    return res.status(200).json({ success: true, code: newVipCode });
+    return res.status(200).json({ success: true, ...result });
   } catch (error) {
-    console.error("Lỗi Webhook:", error);
+    console.error("[WEBHOOK] Lỗi xử lý:", error);
     return res.status(500).send("Internal Server Error");
   }
 });
