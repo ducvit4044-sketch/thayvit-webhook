@@ -15,7 +15,7 @@ if (!admin.apps.length) {
 }
 const db = admin.firestore();
 
-// 2. ĐÃ SỬA: Bọc 3 khóa vào một Object { clientId, apiKey, checksumKey }
+// 2. KHỞI TẠO: Bọc 3 khóa vào một Object { clientId, apiKey, checksumKey }
 const payos = new PayOS({
   clientId: "f4b1e039-f6f9-4ed2-ac76-f8cb608983be",
   apiKey: "ab7a7692-1cb3-4a5f-92e8-845fe82c6fe0",
@@ -55,8 +55,18 @@ app.post("/create-payment-order", async (req, res) => {
       returnUrl: "https://thayvit-webhook.onrender.com"
     };
 
-    // Gọi PayOS tạo Payment Link
-    const paymentLinkRes = await payos.createPaymentLink(paymentData);
+    // ĐÃ SỬA: Gọi API tương thích với các phiên bản của SDK PayOS
+    let paymentLinkRes;
+    if (payos.paymentRequests && typeof payos.paymentRequests.create === "function") {
+      paymentLinkRes = await payos.paymentRequests.create(paymentData);
+    } else if (typeof payos.createPaymentLink === "function") {
+      paymentLinkRes = await payos.createPaymentLink(paymentData);
+    } else {
+      throw new Error("Không tìm thấy hàm tạo link trên PayOS SDK instance");
+    }
+
+    // Tạo link ảnh VietQR để app Android hiển thị qua AsyncImage
+    const qrImage = `https://api.vietqr.io/image/970422-0933203356-compact2.png?amount=2000&addInfo=${transferNote}&accountName=DO%20THANH%20DANH`;
 
     // Lưu đơn hàng vào Firestore với Document ID là transferNote để app lắng nghe
     await db.collection("payment_orders").doc(transferNote).set({
@@ -65,14 +75,15 @@ app.post("/create-payment-order", async (req, res) => {
       userEmail: userEmail || "",
       amount: 2000,
       status: "PENDING",
-      qrCodeUrl: paymentLinkRes.qrCode, // Chuỗi QR VietQR Pro từ PayOS
+      qrCodeUrl: qrImage,
+      paymentLinkId: paymentLinkRes.paymentLinkId || paymentLinkRes.id || "",
       createdAt: admin.firestore.FieldValue.serverTimestamp()
     });
 
     return res.status(200).json({
       success: true,
       orderCode: orderCode,
-      qrCodeUrl: paymentLinkRes.qrCode
+      qrCodeUrl: qrImage
     });
   } catch (error) {
     console.error("Lỗi tạo link thanh toán PayOS:", error);
